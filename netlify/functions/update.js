@@ -1,35 +1,42 @@
 let latestData = {};
 
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") {
+  // CORS
+  const headers = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type"
+  };
+
+  // Arduino sends data
+  if (event.httpMethod === "POST") {
+    try {
+      latestData = JSON.parse(event.body);
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({ status: "ok" })
+      };
+    } catch {
+      return {
+        statusCode: 400,
+        headers,
+        body: "Invalid JSON"
+      };
+    }
+  }
+
+  // Webpage requests data
+  if (event.httpMethod === "GET") {
     return {
-      statusCode: 405,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type"
-      },
-      body: "Method Not Allowed"
+      statusCode: 200,
+      headers,
+      body: JSON.stringify(latestData)
     };
   }
 
-  try {
-    latestData = JSON.parse(event.body);
-    return {
-      statusCode: 200,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type"
-      },
-      body: JSON.stringify({ status: "ok" })
-    };
-  } catch (err) {
-    return {
-      statusCode: 400,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type"
-      },
-      body: "Invalid JSON"
-    };
-  }
+  return {
+    statusCode: 405,
+    headers,
+    body: "Method Not Allowed"
+  };
 };
