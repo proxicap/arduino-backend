@@ -1,6 +1,10 @@
 exports.handler = async () => {
   return {
     statusCode: 200,
-    body: JSON.stringify(global.latestData || {})
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type"
+    },
+    body: JSON.stringify({})
   };
 };
