@@ -1,17 +1,6 @@
-// netlify/functions/update.js
-
 let latestData = {};
 let lastEmailSentAt = 0;
-
-// Shows on your website JSON as "_email"
-let emailDebug = {
-  tried: false,
-  ok: false,
-  status: null,
-  body: null,
-  at: null,
-  reason: null,
-};
+let wasFall = false; // tracks last known state (per warm function instance)
 
 const https = require("https");
 
@@ -31,7 +20,7 @@ function emailjsSend(payload) {
       },
       (res) => {
         let data = "";
-        res.on("data", (chunk) => (data += chunk));
+        res.on("data", (c) => (data += c));
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       }
     );
@@ -49,12 +38,11 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   };
 
-  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers, body: "" };
   }
 
-  // Arduino sends data
+  // Arduino posts data
   if (event.httpMethod === "POST") {
     try {
       latestData = JSON.parse(event.body || "{}");
@@ -62,40 +50,29 @@ exports.handler = async (event) => {
       const status = latestData?.status;
       const isFall = status === "Fall Alert!";
 
-      const now = Date.now();
-      const COOLDOWN_MS = 30000; // change to 5000 for testing
+      // Send email ONLY when we transition into fall state
+      const fallRisingEdge = isFall && !wasFall;
+      wasFall = isFall;
 
-      if (isFall && (now - lastEmailSentAt > COOLDOWN_MS)) {
+      const now = Date.now();
+      const COOLDOWN_MS = 30000;
+
+      if (fallRisingEdge && (now - lastEmailSentAt > COOLDOWN_MS)) {
         lastEmailSentAt = now;
 
-        emailDebug = {
-          tried: true,
-          ok: false,
-          status: null,
-          body: null,
-          at: new Date().toISOString(),
-          reason: `status==${status}`,
-        };
-
-        // ✅ STRICT MODE FIX: accessToken (private key) is REQUIRED
         const payload = {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
-          user_id: "fwfVSV07CXWtpPxNb",                 // public key
-          accessToken: process.env.EMAILJS_PRIVATE_KEY, // <-- set this in Netlify env vars
+          user_id: "fwfVSV07CXWtpPxNb",
+          accessToken: process.env.EMAILJS_PRIVATE_KEY,
         };
 
-        const r = await emailjsSend(payload);
-
-        emailDebug.ok = (r.status === 200);
-        emailDebug.status = r.status;
-        emailDebug.body = r.body;
-
-        console.log("EmailJS:", r.status, r.body);
-      } else {
-        // don't wipe last result; just explain why not sent now
-        emailDebug.at = new Date().toISOString();
-        emailDebug.reason = isFall ? "cooldown" : `status_not_fall (${status})`;
+        try {
+          const r = await emailjsSend(payload);
+          console.log("EmailJS:", r.status, r.body);
+        } catch (e) {
+          console.log("EmailJS ERROR:", String(e));
+        }
       }
 
       return {
@@ -103,26 +80,21 @@ exports.handler = async (event) => {
         headers,
         body: JSON.stringify({ status: "ok" }),
       };
-    } catch (e) {
-      console.log("Invalid JSON:", e);
+    } catch {
       return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
 
-  // Webpage requests data
+  // Website requests latest data
   if (event.httpMethod === "GET") {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify({ ...latestData, _email: emailDebug }),
+      body: JSON.stringify(latestData),
     };
   }
 
-  return {
-    statusCode: 405,
-    headers,
-    body: "Method Not Allowed",
-  };
+  return { statusCode: 405, headers, body: "Method Not Allowed" };
 };
 
 
