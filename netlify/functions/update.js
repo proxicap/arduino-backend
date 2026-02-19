@@ -1,57 +1,42 @@
-const https = require("https");
+let latestData = {};
 
 exports.handler = async (event) => {
+  // CORS
   const headers = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type"
   };
 
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers };
-  }
-
+  // Arduino sends data
   if (event.httpMethod === "POST") {
     try {
-      const data = JSON.parse(event.body || "{}");
-      console.log("Received:", data);
-
-      // 🔥 ALWAYS SEND EMAIL on any POST
-      const body = JSON.stringify({
-        service_id: "service_vavz75e",
-        template_id: "template_y317gq5",
-        user_id: "fwfVSV07CXWtpPxNb"
-      });
-
-      const req = https.request({
-        hostname: "api.emailjs.com",
-        path: "/api/v1.0/email/send",
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body)
-        }
-      });
-
-      req.write(body);
-      req.end();
-
+      latestData = JSON.parse(event.body);
       return {
         statusCode: 200,
         headers,
-        body: JSON.stringify({ test: "email triggered" })
+        body: JSON.stringify({ status: "ok" })
       };
-
-    } catch (e) {
-      console.log("Error:", e);
-      return { statusCode: 500, headers, body: "Error" };
+    } catch {
+      return {
+        statusCode: 400,
+        headers,
+        body: "Invalid JSON"
+      };
     }
   }
 
+  // Webpage requests data
+  if (event.httpMethod === "GET") {
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify(latestData)
+    };
+  }
+
   return {
-    statusCode: 200,
+    statusCode: 405,
     headers,
-    body: JSON.stringify({ ok: true })
+    body: "Method Not Allowed"
   };
 };
-
