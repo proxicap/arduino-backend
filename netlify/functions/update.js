@@ -1,5 +1,17 @@
+// netlify/functions/update.js
+
 let latestData = {};
 let lastEmailSentAt = 0;
+
+// Shows on your website JSON as "_email"
+let emailDebug = {
+  tried: false,
+  ok: false,
+  status: null,
+  body: null,
+  at: null,
+  reason: null,
+};
 
 const https = require("https");
 
@@ -42,7 +54,7 @@ exports.handler = async (event) => {
     return { statusCode: 204, headers, body: "" };
   }
 
-  // Arduino POSTs data
+  // Arduino sends data
   if (event.httpMethod === "POST") {
     try {
       latestData = JSON.parse(event.body || "{}");
@@ -51,24 +63,39 @@ exports.handler = async (event) => {
       const isFall = status === "Fall Alert!";
 
       const now = Date.now();
-      const COOLDOWN_MS = 30000;
+      const COOLDOWN_MS = 30000; // change to 5000 for testing
 
       if (isFall && (now - lastEmailSentAt > COOLDOWN_MS)) {
         lastEmailSentAt = now;
 
+        emailDebug = {
+          tried: true,
+          ok: false,
+          status: null,
+          body: null,
+          at: new Date().toISOString(),
+          reason: `status==${status}`,
+        };
+
+        // ✅ STRICT MODE FIX: accessToken (private key) is REQUIRED
         const payload = {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
-          user_id: "fwfVSV07CXWtpPxNb", // public key
-          accessToken: process.env.EMAILJS_PRIVATE_KEY, // private key
+          user_id: "fwfVSV07CXWtpPxNb",                 // public key
+          accessToken: process.env.EMAILJS_PRIVATE_KEY, // <-- set this in Netlify env vars
         };
 
-        try {
-          const r = await emailjsSend(payload);
-          console.log("EmailJS:", r.status, r.body);
-        } catch (e) {
-          console.log("EmailJS ERROR:", e);
-        }
+        const r = await emailjsSend(payload);
+
+        emailDebug.ok = (r.status === 200);
+        emailDebug.status = r.status;
+        emailDebug.body = r.body;
+
+        console.log("EmailJS:", r.status, r.body);
+      } else {
+        // don't wipe last result; just explain why not sent now
+        emailDebug.at = new Date().toISOString();
+        emailDebug.reason = isFall ? "cooldown" : `status_not_fall (${status})`;
       }
 
       return {
@@ -76,22 +103,18 @@ exports.handler = async (event) => {
         headers,
         body: JSON.stringify({ status: "ok" }),
       };
-
     } catch (e) {
-      return {
-        statusCode: 400,
-        headers,
-        body: "Invalid JSON",
-      };
+      console.log("Invalid JSON:", e);
+      return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
 
-  // Website GETs latest data
+  // Webpage requests data
   if (event.httpMethod === "GET") {
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify(latestData),
+      body: JSON.stringify({ ...latestData, _email: emailDebug }),
     };
   }
 
@@ -101,4 +124,5 @@ exports.handler = async (event) => {
     body: "Method Not Allowed",
   };
 };
+
 
