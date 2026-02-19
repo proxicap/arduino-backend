@@ -1,5 +1,34 @@
 let latestData = {};
-let lastEmailSentAt = 0; // simple cooldown (per warm function instance)
+let lastEmailSentAt = 0;
+
+const https = require("https");
+
+function emailjsSend(payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+
+    const req = https.request(
+      {
+        hostname: "api.emailjs.com",
+        path: "/api/v1.0/email/send",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => (data += chunk));
+        res.on("end", () => resolve({ status: res.statusCode, body: data }));
+      }
+    );
+
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 exports.handler = async (event) => {
   const headers = {
@@ -12,38 +41,23 @@ exports.handler = async (event) => {
     try {
       latestData = JSON.parse(event.body || "{}");
 
-      // ---- EMAIL TRIGGER (server-side) ----
-      // Send only when status is Fall Alert!, with a cooldown to prevent spam
+      // Only email on fall alert + cooldown
       const isFall = latestData && latestData.status === "Fall Alert!";
       const now = Date.now();
-      const COOLDOWN_MS = 30_000; // 30 seconds
+      const COOLDOWN_MS = 30_000;
 
-      if (isFall && (now - lastEmailSentAt > COOLDOWN_MS)) {
+      if (isFall && now - lastEmailSentAt > COOLDOWN_MS) {
         lastEmailSentAt = now;
 
-        // Node 18+ on Netlify usually has global fetch available.
-        const res = await fetch("https://api.emailjs.com/api/v1.0/email/send", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            service_id: "service_vavz75e",
-            template_id: "template_y317gq5",
-            user_id: "fwfVSV07CXWtpPxNb",
+        const payload = {
+          service_id: "service_vavz75e",
+          template_id: "template_y317gq5",
+          user_id: "fwfVSV07CXWtpPxNb", // EmailJS public key (user_id)
+          // template_params: { ... } // optional
+        };
 
-            // OPTIONAL: if your EmailJS template uses variables, uncomment:
-            // template_params: {
-            //   status: latestData.status,
-            //   tiltX: latestData.tiltX,
-            //   tiltZ: latestData.tiltZ,
-            //   lat: latestData.lat,
-            //   lon: latestData.lon,
-            //   time: latestData.time,
-            // },
-          }),
-        });
-
-        const text = await res.text();
-        console.log("EmailJS response:", res.status, text);
+        const r = await emailjsSend(payload);
+        console.log("EmailJS:", r.status, r.body);
       }
 
       return {
@@ -53,26 +67,14 @@ exports.handler = async (event) => {
       };
     } catch (e) {
       console.log("Invalid JSON:", e);
-      return {
-        statusCode: 400,
-        headers,
-        body: "Invalid JSON",
-      };
+      return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
 
   // Webpage requests data
   if (event.httpMethod === "GET") {
-    return {
-      statusCode: 200,
-      headers,
-      body: JSON.stringify(latestData),
-    };
+    return { statusCode: 200, headers, body: JSON.stringify(latestData) };
   }
 
-  return {
-    statusCode: 405,
-    headers,
-    body: "Method Not Allowed",
-  };
+  return { statusCode: 405, headers, body: "Method Not Allowed" };
 };
