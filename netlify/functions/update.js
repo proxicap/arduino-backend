@@ -1,6 +1,7 @@
 let latestData = {};
 let lastEmailSentAt = 0;
 
+// This will show on your website in the JSON as "_email"
 let emailDebug = {
   tried: false,
   ok: false,
@@ -46,19 +47,16 @@ exports.handler = async (event) => {
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   };
 
-  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers, body: "" };
   }
 
-  // Arduino sends data
   if (event.httpMethod === "POST") {
     try {
       latestData = JSON.parse(event.body || "{}");
 
       const status = latestData?.status;
       const isFall = status === "Fall Alert!";
-
       const now = Date.now();
       const COOLDOWN_MS = 30000;
 
@@ -74,12 +72,14 @@ exports.handler = async (event) => {
           reason: `status==${status}`,
         };
 
-        // ✅ YOUR EmailJS payload
+        // ✅ Try with public key only first (same as your Arduino payload)
+        // If EmailJS rejects it, we’ll add accessToken next.
         const payload = {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
           user_id: "fwfVSV07CXWtpPxNb",
-          // If your template uses variables, uncomment and customize:
+
+          // If your template expects params, uncomment and adjust:
           // template_params: {
           //   status: latestData.status,
           //   tiltX: latestData.tiltX,
@@ -90,9 +90,7 @@ exports.handler = async (event) => {
           // },
         };
 
-        // ✅ IMPORTANT: wait for EmailJS to finish
-        const r = await emailjsSend(payload);
-
+        const r = await emailjsSend(payload); // ✅ await is critical
         emailDebug.ok = (r.status === 200);
         emailDebug.status = r.status;
         emailDebug.body = r.body;
@@ -109,18 +107,12 @@ exports.handler = async (event) => {
         };
       }
 
-      return {
-        statusCode: 200,
-        headers,
-        body: JSON.stringify({ status: "ok" }),
-      };
+      return { statusCode: 200, headers, body: JSON.stringify({ status: "ok" }) };
     } catch (e) {
-      console.log("Invalid JSON:", e);
       return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
 
-  // Webpage requests data
   if (event.httpMethod === "GET") {
     return {
       statusCode: 200,
