@@ -131,8 +131,8 @@ exports.handler = async (event) => {
 
       const status = latestData?.status;
       const isFall = status === "Fall Alert!";
-      const lat = latestData?.lat;
-      const lon = latestData?.lon;
+      //const lat = latestData?.lat;
+      //const lon = latestData?.lon;
 
       // 1. Get the readable location (e.g., "Kingsway Mall")
       const streetAddress = await getAddress(lat, lon);
