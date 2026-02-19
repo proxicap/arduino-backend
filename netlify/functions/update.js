@@ -10,7 +10,7 @@ let lastGeocodeLon = 0;
 const https = require("https");
 
 // ================================================================
-// 1. EMAILJS HELPER (Your proven working version)
+// 1. EMAILJS HELPER (Sends the emergency email)
 // ================================================================
 function emailjsSend(payload) {
   return new Promise((resolve, reject) => {
@@ -52,6 +52,7 @@ function getAddress(lat, lon) {
     const movedLat = Math.abs(lat - lastGeocodeLat);
     const movedLon = Math.abs(lon - lastGeocodeLon);
 
+    // If you haven't moved ~50 meters, return the cached address
     if (movedLat < 0.0005 && movedLon < 0.0005 && cachedAddress !== "Waiting for GPS...") {
       return resolve(cachedAddress);
     }
@@ -124,7 +125,7 @@ exports.handler = async (event) => {
     return { statusCode: 204, headers, body: "" };
   }
 
-  // --- ARDUINO POSTS DATA ---
+  // --- A. ARDUINO POSTS DATA ---
   if (event.httpMethod === "POST") {
     try {
       latestData = JSON.parse(event.body || "{}");
@@ -152,9 +153,9 @@ exports.handler = async (event) => {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
           user_id: "fwfVSV07CXWtpPxNb",
-          accessToken: process.env.EMAILJS_PRIVATE_KEY, // <-- YOUR FIX IS HERE!
+          accessToken: process.env.EMAILJS_PRIVATE_KEY, // Needs your Netlify Environment Variable!
           template_params: { 
-            address: streetAddress, // <-- Sends "Kingsway Mall" to the email!
+            address: streetAddress, 
             lat: lat, 
             lon: lon 
           }
@@ -178,12 +179,20 @@ exports.handler = async (event) => {
     }
   }
 
-  // --- WEBSITE REQUESTS DATA ---
+  // --- B. WEBSITE REQUESTS DATA ---
   if (event.httpMethod === "GET") {
+    // 1. Create a copy of the data
+    let displayData = { ...latestData };
+    
+    // 2. Delete the raw GPS numbers from the copy so the website never sees them!
+    delete displayData.lat;
+    delete displayData.lon;
+
+    // 3. Send the cleaned-up data to the website
     return {
       statusCode: 200,
       headers,
-      body: JSON.stringify(latestData),
+      body: JSON.stringify(displayData), 
     };
   }
 
