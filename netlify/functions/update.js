@@ -218,8 +218,8 @@ exports.handler = async (event) => {
     
     // 2. Delete the raw GPS numbers from the copy. 
     // This hides the exact coordinates from the public website, showing only the clean Address string.
-    delete displayData.lat;
-    delete displayData.lon;
+    //delete displayData.lat;
+    //delete displayData.lon;
 
     // 3. Send the cleaned-up data to the frontend browser
     return {
