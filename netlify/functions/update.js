@@ -35,6 +35,28 @@ function formatTime(ts) {
 }
 
 // ================================================================
+// FAST ADDRESS FALLBACK
+// ================================================================
+function getFastAddress(lat, lon) {
+  if (!lat || !lon || (lat === 0 && lon === 0)) {
+    return "Searching for GPS signal...";
+  }
+
+  const movedLat = Math.abs(lat - lastGeocodeLat);
+  const movedLon = Math.abs(lon - lastGeocodeLon);
+
+  if (movedLat < 0.0005 && movedLon < 0.0005 && cachedAddress !== "Waiting for GPS...") {
+    return cachedAddress;
+  }
+
+  if (cachedAddress !== "Waiting for GPS...") {
+    return cachedAddress;
+  }
+
+  return "Searching for GPS signal...";
+}
+
+// ================================================================
 // EMAILJS HELPER
 // ================================================================
 function emailjsSend(payload) {
@@ -57,6 +79,10 @@ function emailjsSend(payload) {
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       }
     );
+
+    req.setTimeout(2500, () => {
+      req.destroy(new Error("EmailJS timeout"));
+    });
 
     req.on("error", reject);
     req.write(body);
@@ -85,7 +111,9 @@ function getAddress(lat, lon) {
         hostname: "nominatim.openstreetmap.org",
         path: `/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`,
         method: "GET",
-        headers: { "User-Agent": "ProxiCap-Wearable/1.0" },
+        headers: {
+          "User-Agent": "ProxiCap-Wearable/1.0"
+        },
       },
       (res) => {
         let data = "";
@@ -128,16 +156,21 @@ function getAddress(lat, lon) {
 
               resolve(cachedAddress);
             } catch {
-              resolve("Address Parsing Error");
+              resolve(getFastAddress(lat, lon));
             }
           } else {
-            resolve("Geocoding API Limit Reached");
+            resolve(getFastAddress(lat, lon));
           }
         });
       }
     );
 
-    req.on("error", () => resolve("Network Error getting address"));
+    req.setTimeout(2000, () => {
+      req.destroy();
+      resolve(getFastAddress(lat, lon));
+    });
+
+    req.on("error", () => resolve(getFastAddress(lat, lon)));
     req.end();
   });
 }
@@ -159,44 +192,45 @@ exports.handler = async (event) => {
   // ================= POST =================
   if (event.httpMethod === "POST") {
     try {
-      latestData = JSON.parse(event.body || "{}");
+      const incoming = JSON.parse(event.body || "{}");
 
-      const status = latestData?.status;
+      const status = incoming?.status;
       const isFall = status === "Fall Alert!";
-      const lat = latestData?.lat;
-      const lon = latestData?.lon;
-
-      const streetAddress = await getAddress(lat, lon);
-      latestData.address = streetAddress;
-
-      const fallRisingEdge = isFall && !wasFall;
-      wasFall = isFall;
+      const lat = incoming?.lat;
+      const lon = incoming?.lon;
 
       const now = Date.now();
       const COOLDOWN_MS = 30000;
 
-      // --- RECORD FALL TIME ---
+      // detect edge BEFORE geocoding
+      const fallRisingEdge = isFall && !wasFall;
+      wasFall = isFall;
+
+      // record fall time
       if (fallRisingEdge) {
         const formatted = formatTime(now);
         latestFallTime = formatted;
         lastRecordedFallTime = formatted;
       }
 
-      // --- ATTACH TO DATA ---
-      latestData.fallTime = isFall ? latestFallTime : null;
-      latestData.lastFallTime = lastRecordedFallTime;
+      // update website data immediately
+      latestData = {
+        ...incoming,
+        address: getFastAddress(lat, lon),
+        fallTime: isFall ? latestFallTime : null,
+        lastFallTime: lastRecordedFallTime,
+        updatedAt: now
+      };
 
-      // --- EMAIL ---
+      // send email first so it is not delayed by reverse geocoding
       if (fallRisingEdge && (now - lastEmailSentAt > COOLDOWN_MS)) {
-        lastEmailSentAt = now;
-
         const payload = {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
           user_id: "fwfVSV07CXWtpPxNb",
           accessToken: process.env.EMAILJS_PRIVATE_KEY,
           template_params: {
-            address: streetAddress,
+            address: latestData.address,
             lat: lat,
             lon: lon,
             fall_time: latestFallTime,
@@ -205,10 +239,18 @@ exports.handler = async (event) => {
 
         try {
           await emailjsSend(payload);
+          lastEmailSentAt = now;
         } catch (e) {
           console.log("Email error:", e);
         }
       }
+
+      // geocode after email
+      const streetAddress = await getAddress(lat, lon);
+      latestData.address = streetAddress;
+      latestData.fallTime = isFall ? latestFallTime : null;
+      latestData.lastFallTime = lastRecordedFallTime;
+      latestData.updatedAt = now;
 
       return {
         statusCode: 200,
@@ -216,17 +258,23 @@ exports.handler = async (event) => {
         body: JSON.stringify({ status: "ok" }),
       };
 
-    } catch {
-      return { statusCode: 400, headers, body: "Invalid JSON" };
+    } catch (e) {
+      console.log("POST error:", e);
+      return {
+        statusCode: 400,
+        headers,
+        body: "Invalid JSON"
+      };
     }
   }
 
   // ================= GET =================
   if (event.httpMethod === "GET") {
-    let displayData = { ...latestData };
-
-    displayData.fallTime = latestFallTime;
-    displayData.lastFallTime = lastRecordedFallTime;
+    const displayData = {
+      ...latestData,
+      fallTime: latestFallTime,
+      lastFallTime: lastRecordedFallTime,
+    };
 
     return {
       statusCode: 200,
@@ -235,5 +283,9 @@ exports.handler = async (event) => {
     };
   }
 
-  return { statusCode: 405, headers, body: "Method Not Allowed" };
+  return {
+    statusCode: 405,
+    headers,
+    body: "Method Not Allowed"
+  };
 };
