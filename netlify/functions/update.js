@@ -238,7 +238,13 @@ exports.handler = async (event) => {
         };
 
         try {
-          await emailjsSend(payload);
+          const result = await emailjsSend(payload);
+          console.log("EmailJS response:", result.status, result.body);
+
+          if (result.status < 200 || result.status >= 300) {
+            throw new Error(`EmailJS failed: ${result.status} ${result.body}`);
+          }
+
           lastEmailSentAt = now;
         } catch (e) {
           console.log("Email error:", e);
