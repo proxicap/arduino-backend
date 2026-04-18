@@ -35,28 +35,6 @@ function formatTime(ts) {
 }
 
 // ================================================================
-// FAST ADDRESS FALLBACK
-// ================================================================
-function getFastAddress(lat, lon) {
-  if (!lat || !lon || (lat === 0 && lon === 0)) {
-    return "Searching for GPS signal...";
-  }
-
-  const movedLat = Math.abs(lat - lastGeocodeLat);
-  const movedLon = Math.abs(lon - lastGeocodeLon);
-
-  if (movedLat < 0.0005 && movedLon < 0.0005 && cachedAddress !== "Waiting for GPS...") {
-    return cachedAddress;
-  }
-
-  if (cachedAddress !== "Waiting for GPS...") {
-    return cachedAddress;
-  }
-
-  return "Searching for GPS signal...";
-}
-
-// ================================================================
 // EMAILJS HELPER
 // ================================================================
 function emailjsSend(payload) {
@@ -79,10 +57,6 @@ function emailjsSend(payload) {
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       }
     );
-
-    req.setTimeout(2500, () => {
-      req.destroy(new Error("EmailJS timeout"));
-    });
 
     req.on("error", reject);
     req.write(body);
@@ -111,9 +85,7 @@ function getAddress(lat, lon) {
         hostname: "nominatim.openstreetmap.org",
         path: `/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`,
         method: "GET",
-        headers: {
-          "User-Agent": "ProxiCap-Wearable/1.0"
-        },
+        headers: { "User-Agent": "ProxiCap-Wearable/1.0" },
       },
       (res) => {
         let data = "";
@@ -156,21 +128,16 @@ function getAddress(lat, lon) {
 
               resolve(cachedAddress);
             } catch {
-              resolve(getFastAddress(lat, lon));
+              resolve("Address Parsing Error");
             }
           } else {
-            resolve(getFastAddress(lat, lon));
+            resolve("Geocoding API Limit Reached");
           }
         });
       }
     );
 
-    req.setTimeout(2000, () => {
-      req.destroy();
-      resolve(getFastAddress(lat, lon));
-    });
-
-    req.on("error", () => resolve(getFastAddress(lat, lon)));
+    req.on("error", () => resolve("Network Error getting address"));
     req.end();
   });
 }
@@ -192,45 +159,44 @@ exports.handler = async (event) => {
   // ================= POST =================
   if (event.httpMethod === "POST") {
     try {
-      const incoming = JSON.parse(event.body || "{}");
+      latestData = JSON.parse(event.body || "{}");
 
-      const status = incoming?.status;
+      const status = latestData?.status;
       const isFall = status === "Fall Alert!";
-      const lat = incoming?.lat;
-      const lon = incoming?.lon;
+      const lat = latestData?.lat;
+      const lon = latestData?.lon;
+
+      const streetAddress = await getAddress(lat, lon);
+      latestData.address = streetAddress;
+
+      const fallRisingEdge = isFall && !wasFall;
+      wasFall = isFall;
 
       const now = Date.now();
       const COOLDOWN_MS = 30000;
 
-      // detect edge BEFORE geocoding
-      const fallRisingEdge = isFall && !wasFall;
-      wasFall = isFall;
-
-      // record fall time
+      // --- RECORD FALL TIME ---
       if (fallRisingEdge) {
         const formatted = formatTime(now);
         latestFallTime = formatted;
         lastRecordedFallTime = formatted;
       }
 
-      // update website data immediately
-      latestData = {
-        ...incoming,
-        address: getFastAddress(lat, lon),
-        fallTime: isFall ? latestFallTime : null,
-        lastFallTime: lastRecordedFallTime,
-        updatedAt: now
-      };
+      // --- ATTACH TO DATA ---
+      latestData.fallTime = isFall ? latestFallTime : null;
+      latestData.lastFallTime = lastRecordedFallTime;
 
-      // send email first so it is not delayed by reverse geocoding
+      // --- EMAIL ---
       if (fallRisingEdge && (now - lastEmailSentAt > COOLDOWN_MS)) {
+        lastEmailSentAt = now;
+
         const payload = {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
           user_id: "fwfVSV07CXWtpPxNb",
           accessToken: process.env.EMAILJS_PRIVATE_KEY,
           template_params: {
-            address: latestData.address,
+            address: streetAddress,
             lat: lat,
             lon: lon,
             fall_time: latestFallTime,
@@ -238,25 +204,11 @@ exports.handler = async (event) => {
         };
 
         try {
-          const result = await emailjsSend(payload);
-          console.log("EmailJS response:", result.status, result.body);
-
-          if (result.status < 200 || result.status >= 300) {
-            throw new Error(`EmailJS failed: ${result.status} ${result.body}`);
-          }
-
-          lastEmailSentAt = now;
+          await emailjsSend(payload);
         } catch (e) {
           console.log("Email error:", e);
         }
       }
-
-      // geocode after email
-      const streetAddress = await getAddress(lat, lon);
-      latestData.address = streetAddress;
-      latestData.fallTime = isFall ? latestFallTime : null;
-      latestData.lastFallTime = lastRecordedFallTime;
-      latestData.updatedAt = now;
 
       return {
         statusCode: 200,
@@ -264,23 +216,17 @@ exports.handler = async (event) => {
         body: JSON.stringify({ status: "ok" }),
       };
 
-    } catch (e) {
-      console.log("POST error:", e);
-      return {
-        statusCode: 400,
-        headers,
-        body: "Invalid JSON"
-      };
+    } catch {
+      return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
 
   // ================= GET =================
   if (event.httpMethod === "GET") {
-    const displayData = {
-      ...latestData,
-      fallTime: latestFallTime,
-      lastFallTime: lastRecordedFallTime,
-    };
+    let displayData = { ...latestData };
+
+    displayData.fallTime = latestFallTime;
+    displayData.lastFallTime = lastRecordedFallTime;
 
     return {
       statusCode: 200,
@@ -289,9 +235,6 @@ exports.handler = async (event) => {
     };
   }
 
-  return {
-    statusCode: 405,
-    headers,
-    body: "Method Not Allowed"
-  };
+  return { statusCode: 405, headers, body: "Method Not Allowed" };
 };
+
