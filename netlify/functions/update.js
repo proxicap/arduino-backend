@@ -188,8 +188,6 @@ exports.handler = async (event) => {
 
       // --- EMAIL ---
       if (fallRisingEdge && (now - lastEmailSentAt > COOLDOWN_MS)) {
-        lastEmailSentAt = now;
-
         const payload = {
           service_id: "service_vavz75e",
           template_id: "template_y317gq5",
@@ -204,8 +202,17 @@ exports.handler = async (event) => {
         };
 
         try {
-          await emailjsSend(payload);
+          const result = await emailjsSend(payload);
+          console.log("EmailJS response:", result.status, result.body);
+
+          // keep cooldown even if service rejects, to avoid hammering Outlook
+          lastEmailSentAt = now;
+
+          if (result.status < 200 || result.status >= 300) {
+            throw new Error(`EmailJS failed: ${result.status} ${result.body}`);
+          }
         } catch (e) {
+          lastEmailSentAt = now;
           console.log("Email error:", e);
         }
       }
@@ -216,7 +223,8 @@ exports.handler = async (event) => {
         body: JSON.stringify({ status: "ok" }),
       };
 
-    } catch {
+    } catch (e) {
+      console.log("POST error:", e);
       return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
@@ -237,4 +245,3 @@ exports.handler = async (event) => {
 
   return { statusCode: 405, headers, body: "Method Not Allowed" };
 };
-
