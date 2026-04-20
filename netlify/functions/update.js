@@ -1,43 +1,59 @@
 // =================================================================
-// HYBRID NETLIFY FUNCTION
-// - keeps your old POST/GET flow
-// - can still accept direct POSTs from the board if needed
-// - on GET, it refreshes from Arduino Cloud first
-// - keeps your EmailJS + geocoding + fall-time logic
+// GLOBAL STATE & CACHE VARIABLES
+// These variables stay in memory while the Netlify function instance
+// is alive. They are used to remember the most recent device data,
+// track fall state changes, and reduce repeated geocoding requests.
 // =================================================================
 
-const https = require("https");
-
-// =================================================================
-// GLOBAL STATE / CACHE
-// =================================================================
-
-// latest dashboard payload kept in memory while function instance is warm
+// Stores the most recent full payload received from the Arduino/device
 let latestData = {};
 
-// email cooldown
+// Stores the timestamp of the last email sent so email alerts are not
+// sent too often in a short period of time
 let lastEmailSentAt = 0;
 
-// previous fall state for rising-edge detection
+// Tracks whether the previous known device state was a fall state
+// This is used to detect a "rising edge" meaning normal -> fall
 let wasFall = false;
 
-// current active fall time
+// --- FALL TIME STATE ---
+
+// Stores the time of the current active fall event
+// This is only filled while a fall is currently happening
 let latestFallTime = null;
 
-// last fall time even after fall ends
+// Stores the most recent fall time even after the fall is over
+// This allows the frontend to still show the last detected fall time
 let lastRecordedFallTime = null;
 
-// cached address + geocoding memo
+// --- CACHE VARIABLES ---
+
+// Stores the most recently resolved street/location name from reverse geocoding
+// Starts with a placeholder until real GPS data is available
 let cachedAddress = "Waiting for GPS...";
+
+// Stores the latitude used in the most recent successful geocoding lookup
 let lastGeocodeLat = 0;
+
+// Stores the longitude used in the most recent successful geocoding lookup
 let lastGeocodeLon = 0;
 
-// =================================================================
+// Built-in Node HTTPS module used to make secure requests to:
+// 1. EmailJS for sending email alerts
+// 2. OpenStreetMap Nominatim for reverse geocoding GPS coordinates
+const https = require("https");
+
+// ================================================================
 // TIME FORMATTER (EDMONTON TIME)
-// =================================================================
+// Converts a timestamp into a readable Edmonton local time string
+// Example output includes date and time in Alberta timezone
+// ================================================================
 function formatTime(ts) {
+  // Create a JavaScript Date object from the given timestamp
   const d = new Date(ts);
 
+  // Convert the time into Edmonton local time with a readable format
+  // The replace() call swaps the comma with a visual separator
   return d.toLocaleString("en-CA", {
     timeZone: "America/Edmonton",
     year: "numeric",
@@ -50,113 +66,110 @@ function formatTime(ts) {
   }).replace(",", "          |             ");
 }
 
-// =================================================================
-// GENERIC HTTPS REQUEST HELPER
-// =================================================================
-function httpsRequest({ hostname, path, method = "GET", headers = {}, body = null }) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname,
-        path,
-        method,
-        headers,
-      },
-      (res) => {
-        let data = "";
-
-        res.on("data", (chunk) => {
-          data += chunk;
-        });
-
-        res.on("end", () => {
-          resolve({
-            status: res.statusCode,
-            body: data,
-          });
-        });
-      }
-    );
-
-    req.on("error", reject);
-
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-// =================================================================
+// ================================================================
 // EMAILJS HELPER
-// =================================================================
+// Sends a POST request to EmailJS so the backend can trigger an
+// email notification when a fall is detected
+// ================================================================
 function emailjsSend(payload) {
   return new Promise((resolve, reject) => {
+    // Convert the JavaScript object into JSON text for transmission
     const body = JSON.stringify(payload);
 
+    // Create the HTTPS request to EmailJS
     const req = https.request(
       {
         hostname: "api.emailjs.com",
         path: "/api/v1.0/email/send",
         method: "POST",
         headers: {
+          // Tell EmailJS the request body is JSON
           "Content-Type": "application/json",
+
+          // Send the size of the body so the server knows how much data to expect
           "Content-Length": Buffer.byteLength(body),
         },
       },
       (res) => {
+        // Collect response chunks from EmailJS
         let data = "";
 
+        // Keep appending data chunks as they arrive
         res.on("data", (c) => (data += c));
+
+        // When the full response is received, resolve the Promise
+        // Return both HTTP status code and response body
         res.on("end", () => resolve({ status: res.statusCode, body: data }));
       }
     );
 
+    // If a network or request error happens, reject the Promise
     req.on("error", reject);
+
+    // Write the JSON body into the request
     req.write(body);
+
+    // Finish and send the request
     req.end();
   });
 }
 
-// =================================================================
-// REVERSE GEOCODING
-// =================================================================
+// ================================================================
+// ADDRESS HELPER
+// Uses reverse geocoding to convert latitude and longitude into a
+// short readable place/address name for the dashboard and email alert
+// ================================================================
 function getAddress(lat, lon) {
   return new Promise((resolve) => {
-    if (
-      lat === null || lon === null ||
-      lat === undefined || lon === undefined ||
-      (lat === 0 && lon === 0)
-    ) {
+    // If coordinates are missing or zero, do not try geocoding
+    // Return a placeholder instead
+    if (!lat || !lon || (lat === 0 && lon === 0)) {
       return resolve("Searching for GPS signal...");
     }
 
+    // Measure how far the device moved since the last geocoding lookup
     const movedLat = Math.abs(lat - lastGeocodeLat);
     const movedLon = Math.abs(lon - lastGeocodeLon);
 
+    // If the position has barely changed and a real address is already cached
+    // return the cached address instead of calling the geocoding service again
+    // This reduces API usage and improves speed
     if (movedLat < 0.0005 && movedLon < 0.0005 && cachedAddress !== "Waiting for GPS...") {
       return resolve(cachedAddress);
     }
 
+    // Create an HTTPS request to OpenStreetMap Nominatim reverse geocoding API
     const req = https.request(
       {
         hostname: "nominatim.openstreetmap.org",
         path: `/reverse?format=json&lat=${lat}&lon=${lon}&addressdetails=1`,
         method: "GET",
+
+        // Nominatim requires a User-Agent string
         headers: { "User-Agent": "ProxiCap-Wearable/1.0" },
       },
       (res) => {
+        // Collect response data as text
         let data = "";
 
         res.on("data", (chunk) => (data += chunk));
 
         res.on("end", () => {
+          // If the API responded successfully
           if (res.statusCode === 200) {
             try {
+              // Parse the returned JSON
               const parsed = JSON.parse(data);
+
+              // Default fallback location name
               let shortName = "Unknown Location";
 
+              // If a detailed address object exists
               if (parsed.address) {
                 const a = parsed.address;
 
+                // Prefer a shorter more useful landmark/building style name
+                // if available, instead of the full long address
                 shortName =
                   a.amenity ||
                   a.mall ||
@@ -168,330 +181,201 @@ function getAddress(lat, lon) {
                   a.leisure ||
                   a.office;
 
+                // If no landmark-style name was found, build a simpler fallback
                 if (!shortName) {
                   if (a.house_number && a.road) {
                     shortName = `${a.house_number} ${a.road}`;
                   } else if (a.road) {
                     shortName = a.road;
                   } else if (parsed.display_name) {
+                    // Use only the first part of the display name if needed
                     shortName = parsed.display_name.split(",")[0].trim();
                   }
                 }
               } else if (parsed.display_name) {
+                // If address details were not provided, fall back to the first part
+                // of the display name
                 shortName = parsed.display_name.split(",")[0].trim();
               }
 
+              // Save the resolved address into cache
               cachedAddress = shortName;
+
+              // Save the coordinates used for this lookup into cache
               lastGeocodeLat = lat;
               lastGeocodeLon = lon;
 
+              // Return the cached short address
               resolve(cachedAddress);
             } catch {
+              // If JSON parsing fails for some reason
               resolve("Address Parsing Error");
             }
           } else {
+            // If the API responded with something other than 200 success
             resolve("Geocoding API Limit Reached");
           }
         });
       }
     );
 
+    // If a network error happens while requesting address data
     req.on("error", () => resolve("Network Error getting address"));
+
+    // Send the request
     req.end();
   });
 }
 
-// =================================================================
-// ARDUINO CLOUD TOKEN
-// =================================================================
-async function getArduinoToken() {
-  const clientId = process.env.ARDUINO_CLIENT_ID;
-  const clientSecret = process.env.ARDUINO_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    throw new Error("Missing ARDUINO_CLIENT_ID or ARDUINO_CLIENT_SECRET");
-  }
-
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: clientId,
-    client_secret: clientSecret,
-    audience: "https://api2.arduino.cc/iot"
-  }).toString();
-
-  const result = await httpsRequest({
-    hostname: "api2.arduino.cc",
-    path: "/iot/v1/clients/token",
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Content-Length": Buffer.byteLength(body)
-    },
-    body
-  });
-
-  if (result.status < 200 || result.status >= 300) {
-    throw new Error(`Arduino token failed: ${result.status} ${result.body}`);
-  }
-
-  const parsed = JSON.parse(result.body || "{}");
-
-  if (!parsed.access_token) {
-    throw new Error("Arduino token missing access_token");
-  }
-
-  return parsed.access_token;
-}
-
-// =================================================================
-// ARDUINO CLOUD PROPERTIES
-// =================================================================
-async function getArduinoProperties() {
-  const thingId = process.env.ARDUINO_THING_ID;
-
-  if (!thingId) {
-    throw new Error("Missing ARDUINO_THING_ID");
-  }
-
-  const token = await getArduinoToken();
-
-  const result = await httpsRequest({
-    hostname: "api2.arduino.cc",
-    path: `/iot/v2/things/${thingId}/properties`,
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json"
-    }
-  });
-
-  if (result.status < 200 || result.status >= 300) {
-    throw new Error(`Arduino properties failed: ${result.status} ${result.body}`);
-  }
-
-  const parsed = JSON.parse(result.body || "[]");
-
-  return Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed.properties)
-    ? parsed.properties
-    : [];
-}
-
-// =================================================================
-// PROPERTY HELPERS
-// =================================================================
-function findProp(props, wantedName) {
-  return props.find(
-    (p) =>
-      p?.name === wantedName ||
-      p?.variable_name === wantedName ||
-      p?.identifier === wantedName
-  );
-}
-
-function tryParse(value) {
-  if (typeof value !== "string") return value;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
-  }
-}
-
-function getPropValue(prop) {
-  if (!prop) return null;
-
-  if (prop.last_value !== undefined) return tryParse(prop.last_value);
-  if (prop.value !== undefined) return tryParse(prop.value);
-  if (prop.persisted_value !== undefined) return tryParse(prop.persisted_value);
-
-  return null;
-}
-
-function getPropUpdatedAt(prop) {
-  if (!prop) return null;
-
-  return (
-    prop.updated_at ||
-    prop.last_value_updated_at ||
-    prop.value_updated_at ||
-    null
-  );
-}
-
-// =================================================================
-// FALL / EMAIL / CACHE LOGIC
-// Reused for both:
-// 1. direct POST payloads
-// 2. Arduino Cloud-fetched payloads
-// =================================================================
-async function processIncomingState(incoming) {
-  latestData = { ...incoming };
-
-  const status = latestData?.status;
-  const isFall = status === "Fall Alert!";
-
-  const lat = latestData?.lat;
-  const lon = latestData?.lon;
-
-  const streetAddress = await getAddress(lat, lon);
-  latestData.address = streetAddress;
-
-  const fallRisingEdge = isFall && !wasFall;
-  wasFall = isFall;
-
-  const now = Date.now();
-  const COOLDOWN_MS = 30000;
-
-  if (fallRisingEdge) {
-    const formatted = formatTime(now);
-    latestFallTime = formatted;
-    lastRecordedFallTime = formatted;
-  }
-
-  latestData.fallTime = isFall ? latestFallTime : null;
-  latestData.lastFallTime = lastRecordedFallTime;
-
-  if (fallRisingEdge && (now - lastEmailSentAt > COOLDOWN_MS)) {
-    const payload = {
-      service_id: "service_vavz75e",
-      template_id: "template_y317gq5",
-      user_id: "fwfVSV07CXWtpPxNb",
-      accessToken: process.env.EMAILJS_PRIVATE_KEY,
-      template_params: {
-        address: streetAddress,
-        lat: lat,
-        lon: lon,
-        fall_time: latestFallTime,
-      }
-    };
-
-    try {
-      const result = await emailjsSend(payload);
-      console.log("EmailJS response:", result.status, result.body);
-
-      lastEmailSentAt = now;
-
-      if (result.status < 200 || result.status >= 300) {
-        throw new Error(`EmailJS failed: ${result.status} ${result.body}`);
-      }
-    } catch (e) {
-      lastEmailSentAt = now;
-      console.log("Email error:", e);
-    }
-  }
-
-  return latestData;
-}
-
-// =================================================================
-// FETCH CURRENT BOARD STATE FROM ARDUINO CLOUD
-// =================================================================
-async function refreshFromArduinoCloud() {
-  const props = await getArduinoProperties();
-
-  const pStatus = findProp(props, "statusText");
-  const pTiltX = findProp(props, "tiltX");
-  const pDistance = findProp(props, "obstacleDistance");
-  const pLocation = findProp(props, "userLocation");
-  const pFall = findProp(props, "fallAlert");
-
-  const statusText = getPropValue(pStatus);
-  const tiltX = getPropValue(pTiltX);
-  const obstacleDistance = getPropValue(pDistance);
-  const fallAlert = getPropValue(pFall);
-  const locationValue = getPropValue(pLocation);
-
-  let lat = null;
-  let lon = null;
-
-  if (locationValue && typeof locationValue === "object") {
-    lat = Number(locationValue.lat ?? locationValue.latitude ?? null);
-    lon = Number(locationValue.lon ?? locationValue.lng ?? locationValue.longitude ?? null);
-
-    if (!Number.isFinite(lat)) lat = null;
-    if (!Number.isFinite(lon)) lon = null;
-  }
-
-  const payload = {
-    status:
-      typeof statusText === "string" && statusText.trim()
-        ? statusText
-        : fallAlert
-        ? "Fall Alert!"
-        : "Normal",
-    tiltX: tiltX ?? null,
-    obstacleDistance: obstacleDistance ?? null,
-    lat,
-    lon,
-    // if you want, later we can use property timestamps instead
-    cloudUpdatedAt:
-      getPropUpdatedAt(pStatus) ||
-      getPropUpdatedAt(pFall) ||
-      getPropUpdatedAt(pLocation) ||
-      null
-  };
-
-  return processIncomingState(payload);
-}
-
-// =================================================================
+// ================================================================
 // MAIN HANDLER
-// =================================================================
+// This is the Netlify serverless function entry point.
+// It handles:
+// 1. OPTIONS requests for CORS preflight
+// 2. POST requests from the Arduino/device
+// 3. GET requests from the website frontend
+// ================================================================
 exports.handler = async (event) => {
+  // CORS headers let the frontend and device communicate with this backend
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
   };
 
-  // CORS preflight
+  // Handle browser preflight request
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers, body: "" };
   }
 
-  // ---------------------------------------------------------------
-  // POST
-  // Keep this so your old direct-device flow still works if needed
-  // ---------------------------------------------------------------
+  // ================= POST =================
+  // POST is used when the Arduino/device sends new sensor data to the backend
   if (event.httpMethod === "POST") {
     try {
-      const incoming = JSON.parse(event.body || "{}");
-      await processIncomingState(incoming);
+      // Parse incoming JSON body and store it as the latest device data
+      latestData = JSON.parse(event.body || "{}");
 
+      // Read current status from the incoming data
+      const status = latestData?.status;
+
+      // Check whether the current status exactly matches the fall alert state
+      const isFall = status === "Fall Alert!";
+
+      // Pull out latitude and longitude from incoming data
+      const lat = latestData?.lat;
+      const lon = latestData?.lon;
+
+      // Convert coordinates into a short readable location/address
+      const streetAddress = await getAddress(lat, lon);
+
+      // Add the resolved address into the stored payload
+      latestData.address = streetAddress;
+
+      // Detect a fall "rising edge"
+      // This becomes true only at the moment the system changes from
+      // not-fall -> fall, preventing repeated triggers every POST
+      const fallRisingEdge = isFall && !wasFall;
+
+      // Update memory of the current fall state for next request
+      wasFall = isFall;
+
+      // Current backend time in milliseconds
+      const now = Date.now();
+
+      // Minimum delay between sent emails
+      const COOLDOWN_MS = 30000;
+
+      // --- RECORD FALL TIME ---
+      // Only record a new fall time at the exact start of a new fall event
+      if (fallRisingEdge) {
+        const formatted = formatTime(now);
+
+        // Store the currently active fall time
+        latestFallTime = formatted;
+
+        // Also store it as the last recorded fall time
+        lastRecordedFallTime = formatted;
+      }
+
+      // --- ATTACH TO DATA ---
+      // fallTime is only shown while a fall is active
+      latestData.fallTime = isFall ? latestFallTime : null;
+
+      // lastFallTime remains available even after the fall ends
+      latestData.lastFallTime = lastRecordedFallTime;
+
+      // --- EMAIL ---
+      // Send an email only if:
+      // 1. a new fall event just started
+      // 2. enough time has passed since the last email
+      if (fallRisingEdge && (now - lastEmailSentAt > COOLDOWN_MS)) {
+        // Build EmailJS payload
+        const payload = {
+          service_id: "service_vavz75e",
+          template_id: "template_y317gq5",
+          user_id: "fwfVSV07CXWtpPxNb",
+
+          // Private key comes from environment variables for security
+          accessToken: process.env.EMAILJS_PRIVATE_KEY,
+
+          // Values sent into the email template
+          template_params: {
+            address: streetAddress,
+            lat: lat,
+            lon: lon,
+            fall_time: latestFallTime,
+          }
+        };
+
+        try {
+          // Send the email through EmailJS
+          const result = await emailjsSend(payload);
+
+          // Log EmailJS response for debugging in Netlify logs
+          console.log("EmailJS response:", result.status, result.body);
+
+          // Update cooldown timestamp even if service rejects
+          // This prevents repeated hammering of the mail service
+          lastEmailSentAt = now;
+
+          // If EmailJS responded but with an error status, throw an error
+          if (result.status < 200 || result.status >= 300) {
+            throw new Error(`EmailJS failed: ${result.status} ${result.body}`);
+          }
+        } catch (e) {
+          // Even on error, still apply cooldown to avoid repeated retries
+          lastEmailSentAt = now;
+
+          // Log the error to Netlify logs
+          console.log("Email error:", e);
+        }
+      }
+
+      // Return success response to the device
       return {
         statusCode: 200,
         headers,
         body: JSON.stringify({ status: "ok" }),
       };
+
     } catch (e) {
+      // If the incoming JSON is invalid or another POST error occurs
       console.log("POST error:", e);
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({ error: "Invalid JSON or POST processing failed" }),
-      };
+      return { statusCode: 400, headers, body: "Invalid JSON" };
     }
   }
 
-  // ---------------------------------------------------------------
-  // GET
-  // Refresh from Arduino Cloud first, then return dashboard JSON
-  // ---------------------------------------------------------------
+  // ================= GET =================
+  // GET is used by the frontend website to read the latest stored device data
   if (event.httpMethod === "GET") {
-    try {
-      await refreshFromArduinoCloud();
-    } catch (e) {
-      console.log("Arduino Cloud refresh error:", e);
-      // fallback: return cached latestData if Cloud fetch fails
-    }
+    // Create a copy of the latest saved data so we can safely attach display values
+    let displayData = { ...latestData };
 
-    const displayData = { ...latestData };
+    // Ensure the frontend always receives current fall-related values
     displayData.fallTime = latestFallTime;
     displayData.lastFallTime = lastRecordedFallTime;
 
+    // Send the most recent dashboard data to the website
     return {
       statusCode: 200,
       headers,
@@ -499,5 +383,6 @@ exports.handler = async (event) => {
     };
   }
 
+  // If request method is not GET, POST, or OPTIONS, reject it
   return { statusCode: 405, headers, body: "Method Not Allowed" };
 };
